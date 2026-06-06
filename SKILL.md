@@ -1,11 +1,11 @@
 ---
 name: js-agent-deployer
-description: Coordinates deployment of new isolated OpenClaw agents from an existing OpenClaw agent. Use when the user asks an OpenClaw agent to create, deploy, bind, or provision another independent agent, especially with Feishu/Lark QR setup and channel routing.
+description: Coordinates deployment and channel routing for isolated OpenClaw agents. Use when the user asks an OpenClaw agent to create, deploy, inspect, bind, reassign, or provision another independent agent, especially with Feishu/Lark QR setup and channel routing.
 ---
 
 # js-agent-deployer
 
-Use this skill when a deployed OpenClaw agent is asked to create another independent OpenClaw agent.
+Use this skill when a deployed OpenClaw agent is asked to create another independent OpenClaw agent, inspect existing independent agents, or manage Feishu/Lark routing for an already-created agent.
 
 The goal is orchestration, not reimplementation. Prefer OpenClaw's existing CLI, channel setup, Feishu/Lark plugin setup, config writers, and routing helpers. Do not hand-write platform API calls unless the existing setup surface cannot support the request.
 
@@ -19,6 +19,7 @@ The goal is orchestration, not reimplementation. Prefer OpenClaw's existing CLI,
 - For Feishu/Lark scan-to-create, the intended UX is channel-delivered QR image: start QR registration from OpenClaw, send the generated QR image attachment back through the current conversation, poll for scan approval, then finish config and routing.
 - Do not use interactive terminal QR for remote/channel deployment. The script is the primary Feishu/Lark provisioning path for this skill.
 - If direct config edits are unavoidable, inspect the current config first, preserve unrelated entries, and validate with `openclaw agents list --bindings`.
+- For existing-agent inspection and Feishu route changes, prefer `scripts/openclaw-agent-admin.mjs`; it reads/writes through OpenClaw's config runtime and redacts app secrets.
 
 ## Required Inputs
 
@@ -70,6 +71,51 @@ If anything is unclear, ask concise questions before changing configuration.
    - Verify with `openclaw agents list --bindings`.
    - Probe channel status when credentials or listener state changed.
    - Send a final summary with the new `agentId`, workspace, agent dir, channel account, routing rule, and any required manual next step.
+
+## Inspect Existing Agents
+
+When the user asks what independent agents exist or how channels are currently bound, run:
+
+```bash
+node scripts/openclaw-agent-admin.mjs --list --openclaw-root <openclawRoot>
+```
+
+Report:
+
+- configured agents (`agentId`, workspace, agent dir, default marker),
+- configured Feishu accounts (`accountId`, enabled/domain/group policy, whether a secret exists),
+- route bindings, especially `feishu` bindings and their owning `agentId`.
+
+Do not print app secrets, token values, or credential file paths. If the OpenClaw CLI is easier in the current environment, `openclaw agents list --bindings` is also acceptable for read-only verification.
+
+## Manage Existing Feishu Routing
+
+Use `scripts/openclaw-agent-admin.mjs` for changing the route of an already-created Feishu/Lark account. The target `agentId` must already exist, and the Feishu account must already be configured.
+
+Add or verify a Feishu account binding:
+
+```bash
+node scripts/openclaw-agent-admin.mjs --feishu-bind --agent <agentId> --account <accountId> --openclaw-root <openclawRoot>
+```
+
+Move an account binding from another agent only when the user explicitly approves reassignment:
+
+```bash
+node scripts/openclaw-agent-admin.mjs --feishu-bind --agent <agentId> --account <accountId> --reassign --restart --openclaw-root <openclawRoot>
+```
+
+Remove a Feishu account binding from an agent:
+
+```bash
+node scripts/openclaw-agent-admin.mjs --feishu-unbind --agent <agentId> --account <accountId> --restart --openclaw-root <openclawRoot>
+```
+
+Rules:
+
+- Omit `--restart` only when the operator wants to apply config later; otherwise restart or report that runtime activation is pending.
+- If the script reports a conflict, do not override it silently. Tell the user which agent owns the Feishu account and ask whether to reassign.
+- If the Feishu account is not configured, use the QR provisioning flow or existing App ID/App Secret setup before binding.
+- After any change, verify with `scripts/openclaw-agent-admin.mjs --list` or `openclaw agents list --bindings`.
 
 ## Feishu/Lark QR Notes
 
@@ -133,6 +179,12 @@ If Feishu/Lark app creation succeeded but the account is not routed to the inten
 node scripts/feishu-qr-provision.mjs --agent <agentId> --account <accountId> --openclaw-root <openclawRoot> --bind-only --restart
 ```
 
+For an already-configured Feishu account, the admin script is also valid:
+
+```bash
+node scripts/openclaw-agent-admin.mjs --feishu-bind --agent <agentId> --account <accountId> --restart --openclaw-root <openclawRoot>
+```
+
 Then verify:
 
 ```bash
@@ -192,4 +244,3 @@ Use this compact shape after a successful deployment:
 - Runtime: <gateway restarted / restart pending>
 - Verification: <agents list / channel probe result>
 ```
-
