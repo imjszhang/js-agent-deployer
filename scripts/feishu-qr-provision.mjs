@@ -745,6 +745,56 @@ function patchFeishuConfig(cfg, accountId, registration, groupPolicy) {
   return next;
 }
 
+function resolveFeishuAccountConfig(cfg, accountId) {
+  const feishu = cfg.channels?.feishu;
+  if (!feishu || typeof feishu !== "object") {
+    return null;
+  }
+  if (!accountId || accountId === "default") {
+    return feishu;
+  }
+  const account = feishu.accounts?.[accountId];
+  if (!account || typeof account !== "object") {
+    return null;
+  }
+  return account;
+}
+
+function hasConfiguredValue(value) {
+  if (typeof value === "string") {
+    return value.trim().length > 0;
+  }
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const source = typeof value.source === "string" ? value.source.trim() : "";
+  const id = typeof value.id === "string" ? value.id.trim() : "";
+  return Boolean(source && id);
+}
+
+function summarizeFeishuCredentialState(cfg, accountId) {
+  const account = resolveFeishuAccountConfig(cfg, accountId);
+  return {
+    accountId: accountId || "default",
+    hasAccount: Boolean(account),
+    hasAppId: hasConfiguredValue(account?.appId),
+    hasAppSecret: hasConfiguredValue(account?.appSecret),
+  };
+}
+
+async function verifyFeishuCredentialsPersisted(runtime, accountId) {
+  const readResult = await readOpenClawConfigSnapshot(runtime);
+  const verification = summarizeFeishuCredentialState(readResult.baseConfig, accountId);
+  if (!verification.hasAppId || !verification.hasAppSecret) {
+    throw new Error(
+      `Feishu account "${verification.accountId}" was written but credentials are incomplete ` +
+        `(hasAppId=${verification.hasAppId}, hasAppSecret=${verification.hasAppSecret}). ` +
+        "Check the active OpenClaw config path and rerun provisioning or provide App ID/App Secret manually.",
+    );
+  }
+  return verification;
+}
+
 function bindingKey(binding) {
   const match = binding.match || {};
   return JSON.stringify([
@@ -837,7 +887,8 @@ async function writeOpenClawConfig(options, registration) {
     bindingAction = result.action;
   }
   await replaceOpenClawConfig(runtime, readResult, next);
-  return { openclawRoot, bindingAction };
+  const credentialVerification = await verifyFeishuCredentialsPersisted(runtime, options.accountId);
+  return { openclawRoot, bindingAction, credentialVerification };
 }
 
 async function writeBindingOnly(options) {
@@ -851,7 +902,8 @@ async function writeBindingOnly(options) {
   const readResult = await readOpenClawConfigSnapshot(runtime);
   const result = addFeishuBinding(readResult.baseConfig, options.agentId, options.accountId);
   await replaceOpenClawConfig(runtime, readResult, result.config);
-  return { openclawRoot, bindingAction: result.action };
+  const credentialVerification = await verifyFeishuCredentialsPersisted(runtime, options.accountId);
+  return { openclawRoot, bindingAction: result.action, credentialVerification };
 }
 
 function restartGateway(openclawRoot) {
@@ -1042,6 +1094,7 @@ async function main() {
       openclawRoot: writeResult.openclawRoot,
       binding: writeResult.bindingAction,
       bindingRule: bindingSummary(options.agentId, options.accountId),
+      credentialVerification: writeResult.credentialVerification,
       restarted: Boolean(restartResult),
       restartRequired: !restartResult,
     };
@@ -1080,6 +1133,7 @@ async function main() {
       openclawRoot: writeResult.openclawRoot,
       binding: writeResult.bindingAction,
       bindingRule: bindingSummary(options.agentId, options.accountId),
+      credentialVerification: writeResult.credentialVerification,
       restarted: Boolean(restartResult),
       restartRequired: !restartResult,
     };
@@ -1174,6 +1228,7 @@ async function main() {
     openclawRoot: writeResult.openclawRoot,
     binding: writeResult.bindingAction,
     bindingRule: bindingSummary(options.agentId, options.accountId),
+    credentialVerification: writeResult.credentialVerification,
     restarted: Boolean(restartResult),
     restartRequired: !restartResult,
   };

@@ -32,13 +32,14 @@ openclaw cron add \
   --at "1s" \
   --session isolated \
   --timeout-seconds 720 \
-  --message "Run: node scripts/feishu-qr-provision.mjs --agent <agentId> --account <accountId> --openclaw-root <openclawRoot> --cron-mode --notify-channel <channel> --notify-target <target> --callback-url <gatewayUrl>/hooks/wake --callback-token-env OPENCLAW_HOOK_TOKEN"
+  --message "Run: node scripts/feishu-qr-provision.mjs --agent <agentId> --account <accountId> --openclaw-root <openclawRoot> --cron-mode --notify-channel <channel> --notify-target <target> --callback-url <gatewayUrl>/hooks/wake --callback-token-env OPENCLAW_HOOK_TOKEN --restart"
 ```
 
 `--cron-mode` 下脚本会：
 
 - 使用 `openclaw message send` 把 QR 图片和关键状态直接发到 `--notify-channel` / `--notify-target`
 - 成功或失败后调用 `--callback-url` 指向的 Gateway `/hooks/wake`，唤醒主 session 做最终验证
+- 写入后重新读取活跃配置并回报 `credentialVerification.hasAppSecret`，确认 secret 已落盘；如果省略 `--restart`，运行中的 Gateway 可能仍显示旧的缺失状态
 - 输出人类可读日志，cron run history 可作为断线补偿来源
 
 Gateway 回调需要先启用 hooks，并配置独立 token。传 token 时优先使用 `--callback-token-env` 或 `--callback-token-file`，避免把 token 写进命令历史。

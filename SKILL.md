@@ -164,7 +164,7 @@ openclaw cron add \
   --at "1s" \
   --session isolated \
   --timeout-seconds 720 \
-  --message "Run: node scripts/feishu-qr-provision.mjs --agent <agentId> --account <accountId> --openclaw-root <openclawRoot> --cron-mode --notify-channel <channel> --notify-target <target> --callback-url <gatewayUrl>/hooks/wake --callback-token-env OPENCLAW_HOOK_TOKEN"
+  --message "Run: node scripts/feishu-qr-provision.mjs --agent <agentId> --account <accountId> --openclaw-root <openclawRoot> --cron-mode --notify-channel <channel> --notify-target <target> --callback-url <gatewayUrl>/hooks/wake --callback-token-env OPENCLAW_HOOK_TOKEN --restart"
 ```
 
 Legacy direct run:
@@ -184,7 +184,7 @@ Defaults:
 - Use `--legacy-mode` when running the original stdout JSON event stream for local debugging or environments without cron/webhooks.
 - Use `--bind-only` when the Feishu/Lark app/account already exists in config but messages are not routed to the intended agent.
 - Use `--app-id` plus one secret source when the Feishu/Lark app already exists on the platform but is not yet configured in OpenClaw.
-- Use `--restart` when the operator approved applying the new route to the running gateway immediately.
+- Use `--restart` when the operator approved applying the new route to the running gateway immediately. Without restart, the config file can contain `appSecret` while the running Gateway still reports the old missing-credentials state.
 - Use `--dry-run` only to test QR generation and polling without changing OpenClaw config.
 
 How to operate it from a channel-hosted agent in cron mode:
@@ -263,7 +263,7 @@ If `openclaw channels list --json` does not show the intended Feishu account id,
 - If a binding conflict appears, report the current owning agent and ask whether to keep, reassign, or choose another channel account.
 - If gateway restart is blocked, report that config is prepared but runtime activation is pending restart.
 - If Feishu creation succeeded but routing still goes to the old agent, run the `--bind-only --restart` repair path and verify `agents list --bindings`.
-- If Feishu creation succeeded but `channels list --json` does not show the intended account, rerun the full QR provisioning flow or ask for App ID/App Secret. Binding alone cannot make an unconfigured account work.
+- If Feishu creation succeeded but `channels list --json` does not show the intended account, first check whether the script emitted `credentialVerification.hasAppSecret=true` and whether `restartRequired=true`. Restart the Gateway when credentials are verified but runtime state is stale; rerun QR provisioning or ask for App ID/App Secret only when verification says credentials are missing.
 - If validation fails, include the exact failing command category and the smallest next action.
 
 ## Final Report Template
