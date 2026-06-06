@@ -136,12 +136,26 @@ async function importOpenClawConfigRuntime(openclawRoot) {
 
 async function readSnapshot(openclawRoot) {
   const runtime = await importOpenClawConfigRuntime(openclawRoot);
-  const snapshot = await runtime.readConfigFileSnapshotForWrite();
+  const result = await runtime.readConfigFileSnapshotForWrite();
+  const snapshot = result?.snapshot ?? result;
+  const writeOptions = result?.writeOptions;
+  const config = snapshot?.sourceConfig ?? snapshot?.runtimeConfig ?? snapshot?.config ?? {};
   return {
     runtime,
-    hash: snapshot.hash,
-    config: structuredClone(snapshot.sourceConfig ?? snapshot.config ?? {}),
+    snapshot,
+    writeOptions,
+    hash: snapshot?.hash,
+    config: structuredClone(config),
   };
+}
+
+async function replaceSnapshotConfig(snapshot, nextConfig) {
+  await snapshot.runtime.replaceConfigFile({
+    nextConfig,
+    snapshot: snapshot.snapshot,
+    writeOptions: snapshot.writeOptions,
+    ...(snapshot.hash !== undefined ? { baseHash: snapshot.hash } : {}),
+  });
 }
 
 function normalizeId(value) {
@@ -386,10 +400,7 @@ async function main() {
       : patchFeishuUnbind(snapshot.config, options);
 
   if (result.config !== snapshot.config) {
-    await snapshot.runtime.replaceConfigFile({
-      nextConfig: result.config,
-      ...(snapshot.hash !== undefined ? { baseHash: snapshot.hash } : {}),
-    });
+    await replaceSnapshotConfig(snapshot, result.config);
   }
 
   let restartResult = null;

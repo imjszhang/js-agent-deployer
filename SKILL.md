@@ -11,6 +11,7 @@ The goal is orchestration, not reimplementation. Prefer OpenClaw's existing CLI,
 
 ## Operating Principles
 
+- Before using this skill for any deployment or binding task, first analyze the current device's OpenClaw environment. Identify the active OpenClaw root, active config file, state dir, configured agents, configured channels/accounts, and existing `bindings[]`. Do not assume `process.cwd()`, `--openclaw-root`, or the skill workspace is the active Gateway config.
 - Treat each new agent as an isolated scope: unique `agentId`, `workspace`, `agentDir`, auth profiles, sessions, and routing bindings.
 - Never reuse an existing `agentDir` for a new agent.
 - Do not print secrets. Redact tokens, app secrets, auth profile contents, and credential file paths when reporting back.
@@ -37,6 +38,13 @@ Collect or infer these before deployment:
 If anything is unclear, ask concise questions before changing configuration.
 
 ## Preferred Workflow
+
+0. Analyze the local OpenClaw environment:
+   - Resolve the OpenClaw CLI/package root that will be used for commands.
+   - Run `openclaw config file` from that root and treat the returned path as the active config.
+   - Note `OPENCLAW_CONFIG_PATH`, `OPENCLAW_STATE_DIR`, and `OPENCLAW_HOME` when available; mismatched env vars can make scripts read a different config than the Gateway.
+   - Run `openclaw agents list --bindings` and `openclaw channels list --json` before deciding whether to create, bind, or repair anything.
+   - If using bundled scripts, pass `--openclaw-root <openclawRoot>` and make sure the script inventory agrees with `openclaw agents list --bindings`. If they disagree, stop and fix the config-runtime environment/path issue before writing config.
 
 1. Inspect the current OpenClaw state:
    - `openclaw agents list --bindings`

@@ -684,6 +684,27 @@ async function importOpenClawConfigRuntime(openclawRoot) {
   return await import(pathToFileURL(resolved).href);
 }
 
+async function readOpenClawConfigSnapshot(runtime) {
+  const result = await runtime.readConfigFileSnapshotForWrite();
+  const snapshot = result?.snapshot ?? result;
+  const writeOptions = result?.writeOptions;
+  const baseConfig = snapshot?.sourceConfig ?? snapshot?.runtimeConfig ?? snapshot?.config ?? {};
+  return {
+    snapshot,
+    writeOptions,
+    baseConfig: structuredClone(baseConfig),
+  };
+}
+
+async function replaceOpenClawConfig(runtime, readResult, nextConfig) {
+  await runtime.replaceConfigFile({
+    nextConfig,
+    snapshot: readResult.snapshot,
+    writeOptions: readResult.writeOptions,
+    ...(readResult.snapshot?.hash !== undefined ? { baseHash: readResult.snapshot.hash } : {}),
+  });
+}
+
 function patchFeishuConfig(cfg, accountId, registration, groupPolicy) {
   const next = structuredClone(cfg);
   next.channels ||= {};
@@ -712,8 +733,12 @@ function patchFeishuConfig(cfg, accountId, registration, groupPolicy) {
     Object.assign(feishu, patch);
   } else {
     feishu.accounts ||= {};
+    const existingAccount =
+      feishu.accounts[accountId] && typeof feishu.accounts[accountId] === "object"
+        ? feishu.accounts[accountId]
+        : {};
     feishu.accounts[accountId] = {
-      ...(feishu.accounts[accountId] || {}),
+      ...existingAccount,
       ...patch,
     };
   }
@@ -798,19 +823,20 @@ async function writeOpenClawConfig(options, registration) {
     );
   }
   const runtime = await importOpenClawConfigRuntime(openclawRoot);
-  const snapshot = await runtime.readConfigFileSnapshotForWrite();
-  const baseConfig = structuredClone(snapshot.sourceConfig ?? snapshot.config ?? {});
-  let next = patchFeishuConfig(baseConfig, options.accountId, registration, options.groupPolicy);
+  const readResult = await readOpenClawConfigSnapshot(runtime);
+  let next = patchFeishuConfig(
+    readResult.baseConfig,
+    options.accountId,
+    registration,
+    options.groupPolicy,
+  );
   let bindingAction = "not_requested";
   if (options.bind) {
     const result = addFeishuBinding(next, options.agentId, options.accountId);
     next = result.config;
     bindingAction = result.action;
   }
-  await runtime.replaceConfigFile({
-    nextConfig: next,
-    ...(snapshot.hash !== undefined ? { baseHash: snapshot.hash } : {}),
-  });
+  await replaceOpenClawConfig(runtime, readResult, next);
   return { openclawRoot, bindingAction };
 }
 
@@ -822,13 +848,9 @@ async function writeBindingOnly(options) {
     );
   }
   const runtime = await importOpenClawConfigRuntime(openclawRoot);
-  const snapshot = await runtime.readConfigFileSnapshotForWrite();
-  const baseConfig = structuredClone(snapshot.sourceConfig ?? snapshot.config ?? {});
-  const result = addFeishuBinding(baseConfig, options.agentId, options.accountId);
-  await runtime.replaceConfigFile({
-    nextConfig: result.config,
-    ...(snapshot.hash !== undefined ? { baseHash: snapshot.hash } : {}),
-  });
+  const readResult = await readOpenClawConfigSnapshot(runtime);
+  const result = addFeishuBinding(readResult.baseConfig, options.agentId, options.accountId);
+  await replaceOpenClawConfig(runtime, readResult, result.config);
   return { openclawRoot, bindingAction: result.action };
 }
 
