@@ -1,9 +1,9 @@
 ---
-name: js-agent-deployer
+name: js-agent-deployer-skill
 description: Coordinates deployment and channel routing for isolated OpenClaw agents. Use when the user asks an OpenClaw agent to create, deploy, inspect, bind, reassign, or provision another independent agent, especially with Feishu/Lark QR setup and channel routing.
 ---
 
-# js-agent-deployer
+# js-agent-deployer-skill
 
 Use this skill when a deployed OpenClaw agent is asked to create another independent OpenClaw agent, inspect existing independent agents, or manage Feishu/Lark routing for an already-created agent.
 

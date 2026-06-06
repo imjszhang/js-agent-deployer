@@ -131,7 +131,7 @@ function parseArgs(argv) {
   if (!["allowlist", "open", "disabled"].includes(out.groupPolicy)) {
     throw new Error('--group-policy must be "allowlist", "open", or "disabled"');
   }
-  out.qrOutputDir ||= path.join(os.tmpdir(), "js-agent-deployer-qrs");
+  out.qrOutputDir ||= path.join(os.tmpdir(), "js-agent-deployer-skill-qrs");
   return out;
 }
 

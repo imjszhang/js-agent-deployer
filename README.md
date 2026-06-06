@@ -1,4 +1,4 @@
-# js-agent-deployer
+# js-agent-deployer-skill
 
 OpenClaw Agent Skill：从已部署的 OpenClaw Agent 编排创建和管理隔离 Agent，重点支持飞书/Lark 扫码建机器人、现有 Agent 查看与飞书通道路由绑定。
 
@@ -17,7 +17,7 @@ OpenClaw Agent Skill：从已部署的 OpenClaw Agent 编排创建和管理隔�
 将本仓库放到 OpenClaw workspace 的技能目录，例如：
 
 ```text
-<workspace>/skills/js-agent-deployer/
+<workspace>/skills/js-agent-deployer-skill/
 ```
 
 确保 `SKILL.md` 与 `scripts/` 在同一目录下，OpenClaw 会自动发现该技能。
