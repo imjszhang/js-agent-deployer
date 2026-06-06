@@ -7,7 +7,7 @@ OpenClaw Agent Skill：从已部署的 OpenClaw Agent 编排创建和管理隔�
 - 指导 Agent 使用 `openclaw agents add` 创建独立 Agent（独立 `agentId`、workspace、agentDir、认证与路由）
 - 飞书/Lark 非交互式扫码建应用：`scripts/feishu-qr-provision.mjs`
 - 生成 QR 图片（PNG/SVG），通过当前对话渠道发给操作者扫码
-- 轮询扫码结果后写入 OpenClaw 渠道配置与路由绑定
+- 在 cron 托管模式下主动投递 QR/进度，并在扫码完成后写入 OpenClaw 渠道配置与路由绑定
 - 支持 `--bind-only`、`--dry-run`、已有 App ID/Secret 直接配置等模式
 - 查看当前 OpenClaw 独立 Agent、Feishu accounts 与通道绑定
 - 修改已创建 Agent 的飞书通道绑定，支持显式 `--reassign` 改绑
@@ -24,14 +24,36 @@ OpenClaw Agent Skill：从已部署的 OpenClaw Agent 编排创建和管理隔�
 
 ## 飞书/Lark 扫码配置
 
+推荐用 OpenClaw cron 托管完整 QR 等待流程，避免父 Agent 长时间盯 stdout：
+
+```bash
+openclaw cron add \
+  --name "Feishu QR setup for <agentId>" \
+  --at "1s" \
+  --session isolated \
+  --timeout-seconds 720 \
+  --message "Run: node scripts/feishu-qr-provision.mjs --agent <agentId> --account <accountId> --openclaw-root <openclawRoot> --cron-mode --notify-channel <channel> --notify-target <target> --callback-url <gatewayUrl>/hooks/wake --callback-token-env OPENCLAW_HOOK_TOKEN"
+```
+
+`--cron-mode` 下脚本会：
+
+- 使用 `openclaw message send` 把 QR 图片和关键状态直接发到 `--notify-channel` / `--notify-target`
+- 成功或失败后调用 `--callback-url` 指向的 Gateway `/hooks/wake`，唤醒主 session 做最终验证
+- 输出人类可读日志，cron run history 可作为断线补偿来源
+
+Gateway 回调需要先启用 hooks，并配置独立 token。传 token 时优先使用 `--callback-token-env` 或 `--callback-token-file`，避免把 token 写进命令历史。
+
+兼容/调试模式仍可直接运行脚本：
+
 ```bash
 node scripts/feishu-qr-provision.mjs \
   --agent <agentId> \
   --account <accountId> \
-  --openclaw-root <openclawRoot>
+  --openclaw-root <openclawRoot> \
+  --legacy-mode
 ```
 
-脚本通过 stdout 输出 JSON 事件行。当看到 `{"event":"qr",...}` 时，将 `qrImagePath` 作为图片附件发给操作者，并保持进程运行直至 `configured`。
+legacy 模式通过 stdout 输出 JSON 事件行。当看到 `{"event":"qr",...}` 时，将 `qrImagePath` 作为图片附件发给操作者，并保持进程运行直至 `configured`。
 
 常用选项：
 
@@ -42,6 +64,10 @@ node scripts/feishu-qr-provision.mjs \
 | `--no-bind` | 只写渠道配置，不加绑定 |
 | `--restart` | 配置完成后重启 gateway |
 | `--dry-run` | 测试 QR 与轮询，不写配置 |
+| `--cron-mode` | cron 托管模式：直接投递 QR/状态，可回调 `/hooks/wake` |
+| `--legacy-mode` | 原始 stdout JSON 事件流模式 |
+| `--notify-channel` / `--notify-target` | cron 模式下投递 QR 和状态的渠道与目标 |
+| `--callback-url` | 完成或失败后调用的 Gateway `/hooks/wake` URL |
 
 ## 查看和管理现有 Agent
 
@@ -93,6 +119,8 @@ node scripts/openclaw-agent-admin.mjs \
 
 - 已安装并构建 [OpenClaw](https://github.com/openclaw/openclaw)（脚本依赖 `openclaw/plugin-sdk/config-runtime`）
 - 目标 `agentId` 已通过 `openclaw agents add` 创建
+- 使用 cron 模式时，OpenClaw Gateway 需要可用，且操作者投递目标可由 `openclaw message send` 访问
+- 使用 `/hooks/wake` 回调时，Gateway 需要启用 `hooks.enabled=true` 并配置专用 hook token
 
 ## 文档
 

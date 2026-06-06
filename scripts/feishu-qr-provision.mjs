@@ -34,11 +34,21 @@ Options:
   --bind-only                  Only add/verify Feishu account routing binding; no QR flow.
   --no-bind                    Write channel account only; do not add routing binding.
   --dry-run                    Print QR and poll result, but do not write OpenClaw config.
+  --cron-mode                  Run as a cron-managed job: human logs + direct notifications.
+  --legacy-mode                Force the original stdout JSON event stream.
+  --notify-channel <name>      Channel for --cron-mode operator updates.
+  --notify-target <target>     Channel target for --cron-mode operator updates.
+  --notify-thread-id <id>      Optional thread/topic id for operator updates.
+  --callback-url <url>         Gateway /hooks/wake URL to call on completion/failure.
+  --callback-token-env <name>  Read callback bearer token from an environment variable.
+  --callback-token-file <path> Read callback bearer token from a local file.
+  --callback-token <token>     Read callback bearer token from argv. Avoid when possible.
+  --callback-mode <mode>       Wake mode: now or next-heartbeat. Defaults to now.
   --help                       Show this help.
 
-The script prints JSON lines. When you see {"event":"qr",...}, send qrImagePath
-as an image attachment through the current chat channel, then keep the process
-running while they scan and approve in Feishu/Lark. qrUrl is only a fallback.
+By default the script prints legacy JSON event lines. In --cron-mode, it writes
+human-readable logs, sends QR/progress updates through openclaw message, and can
+call Gateway /hooks/wake so the main session resumes after the isolated job ends.
 `.trim();
 }
 
@@ -48,6 +58,7 @@ function parseArgs(argv) {
     groupPolicy: "allowlist",
     bind: true,
     dryRun: false,
+    callbackMode: "now",
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -69,6 +80,14 @@ function parseArgs(argv) {
     }
     if (arg === "--bind-only") {
       out.bindOnly = true;
+      continue;
+    }
+    if (arg === "--cron-mode") {
+      out.cronMode = true;
+      continue;
+    }
+    if (arg === "--legacy-mode") {
+      out.legacyMode = true;
       continue;
     }
     const next = argv[i + 1];
@@ -113,6 +132,30 @@ function parseArgs(argv) {
       case "--openclaw-root":
         out.openclawRoot = path.resolve(next);
         break;
+      case "--notify-channel":
+        out.notifyChannel = next.trim();
+        break;
+      case "--notify-target":
+        out.notifyTarget = next.trim();
+        break;
+      case "--notify-thread-id":
+        out.notifyThreadId = next.trim();
+        break;
+      case "--callback-url":
+        out.callbackUrl = next.trim();
+        break;
+      case "--callback-token-env":
+        out.callbackTokenEnv = next.trim();
+        break;
+      case "--callback-token-file":
+        out.callbackTokenFile = path.resolve(next);
+        break;
+      case "--callback-token":
+        out.callbackToken = next;
+        break;
+      case "--callback-mode":
+        out.callbackMode = next.trim();
+        break;
       default:
         throw new Error(`Unknown option: ${arg}`);
     }
@@ -131,12 +174,58 @@ function parseArgs(argv) {
   if (!["allowlist", "open", "disabled"].includes(out.groupPolicy)) {
     throw new Error('--group-policy must be "allowlist", "open", or "disabled"');
   }
+  if (out.cronMode && out.legacyMode) {
+    throw new Error("--cron-mode and --legacy-mode cannot be used together");
+  }
+  if (out.callbackMode !== "now" && out.callbackMode !== "next-heartbeat") {
+    throw new Error('--callback-mode must be "now" or "next-heartbeat"');
+  }
+  if (out.callbackUrl) {
+    const tokenSources = [
+      out.callbackToken ? "argv" : null,
+      out.callbackTokenEnv ? "env" : null,
+      out.callbackTokenFile ? "file" : null,
+    ].filter(Boolean);
+    if (tokenSources.length !== 1) {
+      throw new Error(
+        "Callback setup requires exactly one token source: --callback-token-env, --callback-token-file, or --callback-token.",
+      );
+    }
+    const parsed = new URL(out.callbackUrl);
+    if (parsed.searchParams.has("token") || parsed.searchParams.has("hookToken")) {
+      throw new Error("Callback tokens must be sent via Authorization header, not query string");
+    }
+  }
   out.qrOutputDir ||= path.join(os.tmpdir(), "js-agent-deployer-skill-qrs");
   return out;
 }
 
 function emit(event) {
   process.stdout.write(`${JSON.stringify(event)}\n`);
+}
+
+function reportEvent(options, event) {
+  if (!options.cronMode || options.legacyMode) {
+    emit(event);
+    return;
+  }
+  process.stdout.write(`${new Date().toISOString()} ${event.event}: ${summarizeEvent(event)}\n`);
+}
+
+function summarizeEvent(event) {
+  const safe = { ...event };
+  delete safe.qrUrl;
+  delete safe.instruction;
+  const pairs = Object.entries(safe)
+    .filter(([key]) => key !== "event")
+    .map(([key, value]) => `${key}=${formatSummaryValue(value)}`);
+  return pairs.join(" ") || "ok";
+}
+
+function formatSummaryValue(value) {
+  if (value === null || value === undefined) return "null";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
 }
 
 function resolveExistingAppRegistration(options) {
@@ -499,7 +588,7 @@ function crc32(buf) {
   return (c ^ 0xffffffff) >>> 0;
 }
 
-async function pollAppRegistration({ deviceCode, interval, expireIn, initialDomain }) {
+async function pollAppRegistration({ deviceCode, interval, expireIn, initialDomain, report }) {
   let currentInterval = interval;
   let domain = initialDomain;
   let domainSwitched = false;
@@ -513,7 +602,7 @@ async function pollAppRegistration({ deviceCode, interval, expireIn, initialDoma
         tp: SCAN_TO_CREATE_TP,
       });
     } catch (err) {
-      emit({ event: "poll_retry", reason: String(err?.message || err) });
+      report({ event: "poll_retry", reason: String(err?.message || err) });
       await sleep(currentInterval * 1000);
       continue;
     }
@@ -538,10 +627,10 @@ async function pollAppRegistration({ deviceCode, interval, expireIn, initialDoma
     }
 
     if (pollRes.error === "authorization_pending") {
-      emit({ event: "poll_pending" });
+      report({ event: "poll_pending" });
     } else if (pollRes.error === "slow_down") {
       currentInterval += 5;
-      emit({ event: "poll_slow_down", interval: currentInterval });
+      report({ event: "poll_slow_down", interval: currentInterval });
     } else if (pollRes.error === "access_denied") {
       return { status: "access_denied" };
     } else if (pollRes.error === "expired_token") {
@@ -765,8 +854,135 @@ function restartGateway(openclawRoot) {
   };
 }
 
+function resolveCallbackToken(options) {
+  let token = options.callbackToken;
+  if (options.callbackTokenEnv) {
+    token = process.env[options.callbackTokenEnv];
+    if (!token) {
+      throw new Error(`Environment variable ${options.callbackTokenEnv} is empty or missing`);
+    }
+  }
+  if (options.callbackTokenFile) {
+    token = fs.readFileSync(options.callbackTokenFile, "utf8").trim();
+    if (!token) {
+      throw new Error(`Callback token file ${options.callbackTokenFile} is empty`);
+    }
+  }
+  return token;
+}
+
+function openClawCliPath(options) {
+  const openclawRoot = findOpenClawRoot(options.openclawRoot);
+  if (!openclawRoot) {
+    throw new Error(
+      "Cannot find OpenClaw root. Run this from the OpenClaw repo/package or pass --openclaw-root <path>.",
+    );
+  }
+  const cliPath = path.join(openclawRoot, "openclaw.mjs");
+  if (!fs.existsSync(cliPath)) {
+    throw new Error(`Cannot find OpenClaw CLI at ${cliPath}`);
+  }
+  return { openclawRoot, cliPath };
+}
+
+function notifyOperator(options, { message, media }) {
+  if (!options.cronMode || !options.notifyChannel || !options.notifyTarget) {
+    return { skipped: true };
+  }
+  const { openclawRoot, cliPath } = openClawCliPath(options);
+  const args = [
+    cliPath,
+    "message",
+    "send",
+    "--channel",
+    options.notifyChannel,
+    "--target",
+    options.notifyTarget,
+  ];
+  if (message) args.push("--message", message);
+  if (media) args.push("--media", media);
+  if (options.notifyThreadId) args.push("--thread-id", options.notifyThreadId);
+  const result = spawnSync(process.execPath, args, {
+    cwd: openclawRoot,
+    stdio: ["ignore", "pipe", "pipe"],
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    throw new Error(
+      `Operator notification failed with exit ${result.status}: ${
+        (result.stderr || result.stdout || "").trim() || "no output"
+      }`,
+    );
+  }
+  return { skipped: false };
+}
+
+function notifyOperatorSafely(options, payload, report) {
+  try {
+    const result = notifyOperator(options, payload);
+    if (!result.skipped) {
+      report({ event: "notification_sent" });
+    }
+    return result;
+  } catch (err) {
+    report({ event: "notification_failed", message: String(err?.message || err) });
+    return { skipped: false, failed: true };
+  }
+}
+
+function callbackText(payload) {
+  const safePayload = {
+    status: payload.status,
+    event: payload.event,
+    agentId: payload.agentId,
+    accountId: payload.accountId,
+    domain: payload.domain,
+    binding: payload.binding,
+    restarted: payload.restarted,
+    restartRequired: payload.restartRequired,
+    message: payload.message,
+  };
+  return `OpenClaw deployer QR provisioning result: ${JSON.stringify(safePayload)}`;
+}
+
+async function wakeGateway(options, payload) {
+  if (!options.callbackUrl) {
+    return { skipped: true };
+  }
+  const token = resolveCallbackToken(options);
+  const response = await fetch(options.callbackUrl, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      text: callbackText(payload),
+      mode: options.callbackMode,
+    }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`Gateway wake callback failed with HTTP ${response.status}: ${body || response.statusText}`);
+  }
+  return { skipped: false };
+}
+
+async function finishWithCallback(options, payload, report) {
+  try {
+    const result = await wakeGateway(options, payload);
+    if (!result.skipped) {
+      report({ event: "callback_sent", callbackUrl: options.callbackUrl });
+    }
+  } catch (err) {
+    report({ event: "callback_failed", message: String(err?.message || err) });
+  }
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
+  const report = (event) => reportEvent(options, event);
   if (options.help) {
     console.log(usage());
     return;
@@ -777,13 +993,17 @@ async function main() {
       outputDir: options.qrOutputDir,
       basename: `${options.agentId}-${options.accountId}-qr-only-${Date.now()}`,
     });
-    emit({
+    report({
       event: "qr_only",
       qrUrl: options.qrOnly,
       qrImagePath: qrArtifacts.pngPath,
       qrSvgPath: qrArtifacts.svgPath,
       qrImageMime: "image/png",
     });
+    notifyOperatorSafely(options, {
+      message: `Feishu/Lark QR image generated for agent ${options.agentId}. Scan this image in the mobile app.`,
+      media: qrArtifacts.pngPath,
+    }, report);
     return;
   }
 
@@ -793,7 +1013,7 @@ async function main() {
     if (options.restart) {
       restartResult = restartGateway(writeResult.openclawRoot);
     }
-    emit({
+    const event = {
       event: "binding_configured",
       agentId: options.agentId,
       accountId: options.accountId,
@@ -802,14 +1022,19 @@ async function main() {
       bindingRule: bindingSummary(options.agentId, options.accountId),
       restarted: Boolean(restartResult),
       restartRequired: !restartResult,
-    });
+    };
+    report(event);
+    notifyOperatorSafely(options, {
+      message: `Feishu/Lark binding configured for agent ${options.agentId} and account ${options.accountId}.`,
+    }, report);
+    await finishWithCallback(options, { ...event, status: "success" }, report);
     return;
   }
 
   const existingRegistration = resolveExistingAppRegistration(options);
   if (existingRegistration) {
     if (options.dryRun) {
-      emit({
+      report({
         event: "existing_app_dry_run",
         agentId: options.agentId,
         accountId: options.accountId,
@@ -824,7 +1049,7 @@ async function main() {
     if (options.restart) {
       restartResult = restartGateway(writeResult.openclawRoot);
     }
-    emit({
+    const event = {
       event: "configured_existing_app",
       agentId: options.agentId,
       accountId: options.accountId,
@@ -835,11 +1060,16 @@ async function main() {
       bindingRule: bindingSummary(options.agentId, options.accountId),
       restarted: Boolean(restartResult),
       restartRequired: !restartResult,
-    });
+    };
+    report(event);
+    notifyOperatorSafely(options, {
+      message: `Existing Feishu/Lark app configured for agent ${options.agentId} and account ${options.accountId}.`,
+    }, report);
+    await finishWithCallback(options, { ...event, status: "success" }, report);
     return;
   }
 
-  emit({
+  report({
     event: "start",
     agentId: options.agentId,
     accountId: options.accountId,
@@ -854,7 +1084,7 @@ async function main() {
     outputDir: options.qrOutputDir,
     basename: `${options.agentId}-${options.accountId}-${Date.now()}`,
   });
-  emit({
+  report({
     event: "qr",
     qrUrl: begin.qrUrl,
     qrImagePath: qrArtifacts.pngPath,
@@ -864,29 +1094,48 @@ async function main() {
     expiresInSeconds: begin.expireIn,
     instruction: "Send qrImagePath as an image attachment through the current chat channel. Use qrUrl only as a fallback. Keep this process running while the operator scans and approves.",
   });
+  notifyOperatorSafely(options, {
+    message:
+      `Scan this Feishu/Lark QR code to create the app for OpenClaw agent ${options.agentId}. ` +
+      `It expires in ${begin.expireIn} seconds. If the image fails to render, open this fallback URL: ${begin.qrUrl}`,
+    media: qrArtifacts.pngPath,
+  }, report);
 
   const outcome = await pollAppRegistration({
     deviceCode: begin.deviceCode,
     interval: begin.interval,
     expireIn: begin.expireIn,
     initialDomain: options.domain,
+    report,
   });
 
   if (outcome.status !== "success") {
-    emit({ event: "failed", status: outcome.status, message: outcome.message });
+    const event = { event: "failed", status: outcome.status, message: outcome.message };
+    report(event);
+    notifyOperatorSafely(options, {
+      message: `Feishu/Lark QR provisioning for agent ${options.agentId} failed: ${outcome.status}${
+        outcome.message ? ` (${outcome.message})` : ""
+      }.`,
+    }, report);
+    await finishWithCallback(options, { ...event, agentId: options.agentId, accountId: options.accountId }, report);
     process.exitCode = 1;
     return;
   }
 
-  emit({
+  report({
     event: "scan_success",
     appId: outcome.result.appId,
     domain: outcome.result.domain,
     openId: outcome.result.openId || null,
   });
+  notifyOperatorSafely(options, {
+    message: `Feishu/Lark scan approved for agent ${options.agentId}. Writing OpenClaw channel config now.`,
+  }, report);
 
   if (options.dryRun) {
-    emit({ event: "dry_run_complete" });
+    const event = { event: "dry_run_complete", agentId: options.agentId, accountId: options.accountId, status: "success" };
+    report(event);
+    await finishWithCallback(options, event, report);
     return;
   }
 
@@ -895,7 +1144,7 @@ async function main() {
   if (options.restart) {
     restartResult = restartGateway(writeResult.openclawRoot);
   }
-  emit({
+  const event = {
     event: "configured",
     agentId: options.agentId,
     accountId: options.accountId,
@@ -905,10 +1154,40 @@ async function main() {
     bindingRule: bindingSummary(options.agentId, options.accountId),
     restarted: Boolean(restartResult),
     restartRequired: !restartResult,
-  });
+  };
+  report(event);
+  notifyOperatorSafely(options, {
+    message:
+      `Feishu/Lark provisioning finished for agent ${options.agentId}. ` +
+      `Account ${options.accountId} is configured; binding ${writeResult.bindingAction}; ` +
+      (restartResult ? "gateway restarted." : "gateway restart is still required."),
+  }, report);
+  await finishWithCallback(options, { ...event, status: "success" }, report);
 }
 
-main().catch((err) => {
-  emit({ event: "error", message: String(err?.message || err) });
+main().catch(async (err) => {
+  if (process.argv.includes("--cron-mode") && !process.argv.includes("--legacy-mode")) {
+    const message = String(err?.message || err);
+    process.stderr.write(`error: ${message}\n`);
+    try {
+      const options = parseArgs(process.argv.slice(2));
+      const report = (event) => reportEvent(options, event);
+      await finishWithCallback(
+        options,
+        {
+          event: "error",
+          status: "error",
+          agentId: options.agentId,
+          accountId: options.accountId,
+          message,
+        },
+        report,
+      );
+    } catch (callbackErr) {
+      process.stderr.write(`callback_error: ${String(callbackErr?.message || callbackErr)}\n`);
+    }
+  } else {
+    emit({ event: "error", message: String(err?.message || err) });
+  }
   process.exitCode = 1;
 });

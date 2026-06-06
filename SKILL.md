@@ -15,8 +15,8 @@ The goal is orchestration, not reimplementation. Prefer OpenClaw's existing CLI,
 - Never reuse an existing `agentDir` for a new agent.
 - Do not print secrets. Redact tokens, app secrets, auth profile contents, and credential file paths when reporting back.
 - Before executing deployment commands, confirm the requested agent identity, workspace path, channel account, model/auth expectations, routing target, and whether a gateway restart is acceptable.
-- Prefer additive changes through `openclaw agents add` for agent creation. For Feishu/Lark QR provisioning, run `scripts/feishu-qr-provision.mjs` directly; do not try PTY or interactive `openclaw channels login` first.
-- For Feishu/Lark scan-to-create, the intended UX is channel-delivered QR image: start QR registration from OpenClaw, send the generated QR image attachment back through the current conversation, poll for scan approval, then finish config and routing.
+- Prefer additive changes through `openclaw agents add` for agent creation. For Feishu/Lark QR provisioning, run `scripts/feishu-qr-provision.mjs` in cron-managed mode when webhook/message delivery details are available; do not try PTY or interactive `openclaw channels login` first.
+- For Feishu/Lark scan-to-create, the intended UX is channel-delivered QR image from an isolated cron job: start QR registration from OpenClaw, send the generated QR image attachment through the operator channel, let the cron-owned run wait for scan approval, then finish config and routing.
 - Do not use interactive terminal QR for remote/channel deployment. The script is the primary Feishu/Lark provisioning path for this skill.
 - If direct config edits are unavoidable, inspect the current config first, preserve unrelated entries, and validate with `openclaw agents list --bindings`.
 - For existing-agent inspection and Feishu route changes, prefer `scripts/openclaw-agent-admin.mjs`; it reads/writes through OpenClaw's config runtime and redacts app secrets.
@@ -32,6 +32,7 @@ Collect or infer these before deployment:
 - Channel plan: Feishu/Lark bot, another supported channel, or no channel yet.
 - Routing plan: whole channel account, a specific DM, or a specific group.
 - Operator contact: where to send the QR code, progress updates, and final proof.
+- Cron delivery details for QR setup: `notifyChannel`, `notifyTarget`, optional `notifyThreadId`, and whether Gateway `/hooks/wake` is enabled for completion callbacks.
 
 If anything is unclear, ask concise questions before changing configuration.
 
@@ -47,18 +48,20 @@ If anything is unclear, ask concise questions before changing configuration.
    - Allow the existing command to create the workspace, session store, agent config, and optional auth setup.
 
 3. Set up the channel account:
-   - For Feishu/Lark, run `node scripts/feishu-qr-provision.mjs --agent <agentId> --account <accountId> --openclaw-root <openclawRoot>` directly.
-   - This script is the default QR setup path when the goal is automatic bot creation.
-   - It writes a QR PNG/SVG image file and exposes paths as data (`qrImagePath`, `qrSvgPath`, plus fallback `qrUrl`) so the current chat channel can send an actual QR image.
+   - For Feishu/Lark automatic bot creation, prefer an isolated cron job that runs `scripts/feishu-qr-provision.mjs --cron-mode` with `--notify-channel` and `--notify-target`.
+   - Use a one-shot isolated cron job with a timeout longer than the Feishu/Lark QR lifetime, normally 720 seconds.
+   - Include `--callback-url <gateway>/hooks/wake` plus one callback token source when Gateway hooks are enabled and the main session should be woken after completion.
+   - The script writes a QR PNG/SVG image file and, in `--cron-mode`, sends the image directly through `openclaw message send`; legacy mode still exposes `qrImagePath`, `qrSvgPath`, and fallback `qrUrl` on stdout.
    - Use manual setup only when the user explicitly chooses manual App ID/App Secret entry. Do not fall back to manual setup merely because terminal interaction is unavailable.
 
 4. Relay QR setup to the operator:
-   - When the script emits `{"event":"qr",...}`, send `qrImagePath` as an image attachment through the current conversation.
+   - In the preferred cron flow, the script sends the QR image and progress updates itself. Do not start a second polling loop in the main Agent turn.
+   - In legacy mode, when the script emits `{"event":"qr",...}`, send `qrImagePath` as an image attachment through the current conversation.
    - Do not send only the `qrUrl` link unless image upload/attachment fails.
    - Explain that the operator must scan with Feishu/Lark mobile app and approve the app creation.
    - Continue polling only within the command's supported flow.
    - If the QR expires, report that clearly and rerun setup only after user approval.
-   - Watch stdout for a JSON line with `"event":"qr"` and immediately send its `qrImagePath` to the operator through the current chat channel.
+   - For cron flow recovery, inspect the cron run history once instead of continuously watching stdout.
 
 5. Bind routing:
    - For a whole Feishu/Lark account, let `scripts/feishu-qr-provision.mjs` add the account-level binding.
@@ -123,12 +126,12 @@ OpenClaw already owns the Feishu/Lark QR app-registration flow in the Feishu plu
 
 For this skill, the desired Feishu/Lark flow is:
 
-- run `scripts/feishu-qr-provision.mjs` from the already deployed agent,
-- capture the generated `qrImagePath` as data,
-- send that QR image file to the requesting operator through the current channel,
-- poll until scan success, denial, expiry, or timeout,
+- create a one-shot isolated cron job that runs `scripts/feishu-qr-provision.mjs --cron-mode`,
+- pass the operator channel/target so the script can send the generated QR image directly,
+- let the cron-owned process wait until scan success, denial, expiry, or timeout,
 - persist `appId`, `appSecret`, and `domain` through OpenClaw's channel config writer,
 - add a Feishu account-level binding to the new `agentId`,
+- call Gateway `/hooks/wake` when configured so the main session can resume with the result,
 - restart or reload the gateway if required,
 - verify and report completion in the same conversation.
 
@@ -145,8 +148,21 @@ The useful pattern from Feishu-style adapters is the operator loop:
 
 For Feishu/Lark, use the bundled provisioning script directly. Do not try `openclaw channels login` or any PTY-based flow first.
 
+Preferred cron-managed run:
+
 ```bash
-node scripts/feishu-qr-provision.mjs --agent <agentId> --account <accountId> --openclaw-root <openclawRoot>
+openclaw cron add \
+  --name "Feishu QR setup for <agentId>" \
+  --at "1s" \
+  --session isolated \
+  --timeout-seconds 720 \
+  --message "Run: node scripts/feishu-qr-provision.mjs --agent <agentId> --account <accountId> --openclaw-root <openclawRoot> --cron-mode --notify-channel <channel> --notify-target <target> --callback-url <gatewayUrl>/hooks/wake --callback-token-env OPENCLAW_HOOK_TOKEN"
+```
+
+Legacy direct run:
+
+```bash
+node scripts/feishu-qr-provision.mjs --agent <agentId> --account <accountId> --openclaw-root <openclawRoot> --legacy-mode
 ```
 
 Defaults:
@@ -155,14 +171,25 @@ Defaults:
 - `--domain` defaults to `feishu`; use `--domain lark` for Lark.
 - `--group-policy` defaults to `allowlist`.
 - The script writes the Feishu account config and adds an account-level binding unless `--no-bind` is provided.
+- Use `--cron-mode` for cron-managed provisioning. Provide `--notify-channel` and `--notify-target` so the script can send QR/progress messages without the parent Agent watching stdout.
+- Use `--callback-url` plus exactly one of `--callback-token-env`, `--callback-token-file`, or `--callback-token` to wake the main session when the isolated run finishes.
+- Use `--legacy-mode` when running the original stdout JSON event stream for local debugging or environments without cron/webhooks.
 - Use `--bind-only` when the Feishu/Lark app/account already exists in config but messages are not routed to the intended agent.
 - Use `--app-id` plus one secret source when the Feishu/Lark app already exists on the platform but is not yet configured in OpenClaw.
 - Use `--restart` when the operator approved applying the new route to the running gateway immediately.
 - Use `--dry-run` only to test QR generation and polling without changing OpenClaw config.
 
-How to operate it from a channel-hosted agent:
+How to operate it from a channel-hosted agent in cron mode:
 
-1. Start the script and keep it running.
+1. Create the isolated cron job with `--cron-mode`, operator delivery args, and an optional `/hooks/wake` callback.
+2. Tell the user the QR will arrive as a channel attachment and must be approved in Feishu/Lark.
+3. Let the cron-owned run wait for `scan_success` and `configured`; do not keep the main turn blocked on stdout.
+4. When the callback wakes the main session, verify with `openclaw agents list --bindings` and `openclaw channels status --probe`.
+5. If no callback is configured or the operator asks for status, inspect `openclaw cron runs --id <jobId>` once.
+
+How to operate it in legacy mode:
+
+1. Start the script with `--legacy-mode` and keep it running.
 2. When stdout emits `{"event":"qr",...}`, send `qrImagePath` to the user as an image attachment in the current channel. Use `qrUrl` only as fallback text if image sending fails.
 3. Tell the user to scan and approve in Feishu/Lark.
 4. Wait for `scan_success`, then `configured`.
@@ -221,9 +248,10 @@ If `openclaw channels list --json` does not show the intended Feishu account id,
 ## Failure Handling
 
 - If credentials are missing, ask the user to choose QR setup or manual App ID/App Secret entry.
-- If QR setup fails because the Feishu/Lark app does not react, retry once only after user confirmation, then offer manual setup.
+- If QR setup fails because the Feishu/Lark app does not react, inspect the isolated cron run history once, retry once only after user confirmation, then offer manual setup.
 - Do not attempt PTY or interactive `openclaw channels login` for Feishu/Lark QR setup in this skill.
 - If `scripts/feishu-qr-provision.mjs` fails, report the concrete script failure. Only offer manual Feishu Open Platform setup if the user chooses that fallback.
+- If `/hooks/wake` is unavailable or fails, use the operator notification and cron run history as the source of truth; do not start a new polling loop.
 - If a binding conflict appears, report the current owning agent and ask whether to keep, reassign, or choose another channel account.
 - If gateway restart is blocked, report that config is prepared but runtime activation is pending restart.
 - If Feishu creation succeeded but routing still goes to the old agent, run the `--bind-only --restart` repair path and verify `agents list --bindings`.
