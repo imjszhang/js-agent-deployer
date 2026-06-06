@@ -159,7 +159,7 @@ If `openclaw channels list --json` does not show the intended Feishu account id,
   FEISHU_APP_SECRET_<ACCOUNT_ENV_SLUG>="<secret>" node scripts/feishu-qr-provision.mjs --agent <agentId> --account <accountId> --openclaw-root <openclawRoot> --app-id <cli_xxx> --app-secret-env FEISHU_APP_SECRET_<ACCOUNT_ENV_SLUG> --restart
   ```
 
-  Derive `<ACCOUNT_ENV_SLUG>` from the target account id by uppercasing it and replacing non-alphanumeric characters with `_` (for example `research-bot` -> `RESEARCH_BOT`). Do not hardcode `JS_RESEARCH` unless the actual account id is `js_research`.
+  Derive `<ACCOUNT_ENV_SLUG>` from the target `--account` value by uppercasing it and replacing non-alphanumeric characters with `_` (for example `my-bot` -> `MY_BOT`). Never hardcode a slug from a previous deployment.
 
   Prefer `--app-secret-env` or `--app-secret-file` over `--app-secret` so the secret is not exposed in shell history.
 
